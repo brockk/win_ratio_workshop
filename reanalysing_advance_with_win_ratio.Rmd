@@ -1,0 +1,220 @@
+---
+title: "Re-analysing ADVANCE with the Win Ratio"
+author: "Severine Bompoint"
+date: "2026-09-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# WINS examples
+## Example 1: a binary outcome 
+
+There is an example dataset called `data_binary` included in `WINS` for demonstration:
+
+```{r}
+library(WINS)
+
+
+head(data_binary)
+```
+We have columns:
+
+- `id`, identifying patients
+- `arm`, identifying treatment arm
+- and binary outcomes `Y_1`, `Y_2`, and `Y_3`.
+
+We can calculate a win-ratio using hierarchy $Y_1 > Y_2 > Y_3$:
+
+```{r}
+win.stat(
+  data = data_binary,
+  ep_type = c("binary"),
+  arm.name = c("A","B"),
+  priority = c(1, 2, 3),
+  stratum.weight = "unstratified",
+  pvalue = "two-sided",
+  summary.print = TRUE
+)
+```
+
+The function `win.stat` assumes it will find outcome columns named `Y_1`, `Y_2`, etc in `data_binary`.
+The parameter `priority = c(1, 2, 3)` tells it to resolve wins by first looking at `Y_1`, followed by `Y_2`, and then finally `Y_3`.
+If we added a forth outcome with lowest priority, we would name it `Y_4` and specify `priority = c(1, 2, 3, 4)`.
+
+Note `ep_type = c("binary")`, telling the function that **all** of our outcomes are binary.
+See https://cran.r-project.org/web/packages/WINS/vignettes/vignette.pdf for examples with a mixture of outcome types.
+
+Amongst R functions, `win.stat` in `WINS` is somewhat unusual in that by default it prints analysis to the console. 
+If you want to assign the analysis object to a variable name, like `wins_all`, you need to include the parameter `summary.print = FALSE`:
+
+```{r}
+wins_all <- win.stat(
+  data = data_binary,
+  ep_type = c("binary"),
+  arm.name = c("A","B"),
+  priority = c(1, 2, 3),
+  stratum.weight = "unstratified",
+  pvalue = "two-sided",
+  summary.print = FALSE
+)
+```
+
+`wins-all` is now an object in the R session:
+
+```{r}
+print(wins_all)
+```
+
+Individual elements can be plucked out:
+
+```{r}
+wins_all$Win_statistic$Win_Ratio[1]
+```
+
+
+
+## Example 2: a continuous outcome (cont.)
+Likewise, there is a test dataset in `WINS` that contains continuous outcomes:
+
+```{r}
+head(data_continuous)
+```
+
+```{r}
+win.stat(
+  data = data_continuous,
+  ep_type = c("continuous"),
+  arm.name = c("A","B"),
+  priority = c(1, 2, 3),
+  stratum.weight = "unstratified",
+  pvalue = "two-sided",
+  summary.print = TRUE
+)
+```
+
+Note `ep_type = c("continuous")`, telling the function that **all** of our outcomes are continuous.
+
+
+
+## Example 3: a time-to-event outcome (cont.)
+There is also a test dataset in `WINS` that contains time-to-event outcomes:
+```{r}
+head(data_tte)
+```
+
+In contrast to the binary and continuous outcomes, the time-to-event outcomes require two columns each: `Y_1` (e.g.) containing the event time, possibly censored; and `Delta_1` (e.g.) containing a binary indicator of whether the event occurred (i.e. `1`) or was censored (`0`).
+
+```{r}
+win.stat(
+  data = data_tte,
+  ep_type = c("tte"),
+  arm.name = c("A","B"),
+  priority = c(1, 2, 3),
+  stratum.weight = "unstratified",
+  pvalue = "two-sided",
+  summary.print = TRUE
+)
+```
+
+Note `ep_type = c("tte")`, telling the function that **all** of our outcomes are time-to-event.
+
+## Example 4: Plotting the win proportion for tte endpoints over the study time
+
+This is a simulated example with two TTE endpoints.
+```{r, cache=TRUE}
+data <- sim.data(
+  n_trt = 200,
+  n_con = 200,
+  n_ep = 2,
+  arm.name = c("A","B"),
+  ep_type = "tte",
+  cdist.rate = 0.5,
+  sim_method = "copula",
+  copula_trt=copula::normalCopula(0.9),
+  margins_trt=c("gamma", "beta"),
+  paramMargins_trt=list(list(shape=2, scale=1),
+                        list(shape1=2, shape2=2)),
+  copula_con=copula::normalCopula(0.9),
+  margins_con=c("gamma", "beta"),
+  paramMargins_con=list(list(shape=2, scale=1),
+                        list(shape1=2, shape2=2)),
+  max_accrual_time = 5
+)
+
+partition_t.plot(
+  data, 
+  Ctime = seq(0,8,0.2), 
+  arm.name = c("A","B"), 
+  priority = c(1,2), 
+  tau = 0, 
+  plotTimeUnit = "days", 
+  trt_group = "both"
+)
+```
+
+## Example 5: Plotting the Win Statistics for tte endpoints over the study time
+
+This is a simulated example with two TTE endpoints.
+```{r, cache=TRUE}
+stat_t.plot(
+  data, 
+  arm.name = c("A","B"),
+  priority = c(1,2), 
+  Ctime = seq(2,12,1),
+  plotTimeUnit = "years",
+  statistic = "WR", 
+  tau = 0, 
+  stratum.weight = "unstratified", 
+  plot_CI = TRUE
+)
+```
+
+
+# George Institute Cumulative analysis
+In the re-analysis of the ADVANCE trial and in other George Institute trials, we have produced cumulative analyses to examine the relative impact of the outcome hierarchy in the overall win ratio estimate.
+By cumulative analyses, for a given outcome hierarchy we mean examining the win ratio based only on the first component, then on the first two components, and so on until all components are used (i.e. using the full hierarchy).
+This entailed writing some functions that would perform the incremental analysis and created the notion of a data-package, comprising a dataset to send to WINS, plus the label, type, and min difference (tau) for each variable.
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(purrr)
+
+data_package <- list( 
+  # Example dataset provided by WINS package 
+  df = data_binary %>% 
+    mutate( 
+      # In our functions, arm column must contain T and C, so recode: 
+      arm = case_when( 
+        arm == "A" ~ "T", 
+        arm == "B" ~ "C", 
+        .default = NA 
+      )
+    ), 
+  ep_type = c("binary", "binary", "binary"), 
+  tau = c(0, 0, 0), 
+  labels = c("Mortality", "+ Hospitalisation", "+ AE") # For example 
+)
+
+# Cumulative analysis:
+source("functions.R")
+x <- 
+  run_cumulative_analysis(
+    data_package = data_package,
+    priority = c(1, 2, 3)
+  )
+```
+
+## Example 6 - the decision tree
+```{r, fig.width=16, fig.height=9}
+wr_cumulative_flow_plot(x,
+  plot_title = "My trial"
+)
+```
+
+## Example 7 - cumulative plot
+```{r, fig.width=16, fig.height=9}
+wr_cumulative_panel_plot(x)
+```

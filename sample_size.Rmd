@@ -1,0 +1,473 @@
+---
+title: "Sample Size for Win Ratio"
+subtitle: "A simulation-based approach using WINS R package"
+author: "Anthony Devaux (The George Institute for Global Health)"
+date: "ICTMC 2026 Workshop"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 8, fig.height = 5)
+```
+
+# Packages
+
+The following block of code will install the packages used in this docuement.
+
+```{r, eval=FALSE}
+required_packages <- c("dplyr", "WINS", "copula", "ggplot2", "furrr", "future", "dplyr")
+
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Simple sample size estimation
+If you happen to be able to estimate the win ratio you target and the residual proportion of ties, you can derive the required sample size using a formula. 
+The formula is implemented in different packages.
+
+In this toy example:
+
+- We seek WR = 1.5
+- with 90% power
+- at two-sided 5% significance level or one-sided 2.5% (see below)
+- using 1:1 randomisation
+- expecting 15% residual ties.
+
+`Pass 2025` (Use module _Tests for Two Groups using the Win-Ratio Composite Endpoint_) gives 231 per arm, totalling 462 in a two-arm RCT.
+
+Using `hce`:
+
+```{r}
+library(hce)
+
+sizeWR(
+  WR = 1.5,      # Win ratio = 1.5
+  Pties = 0.15,  # 15% ties
+  power = 0.9,   # Power = 90%
+  k = 0.5,       # 1:1 randomisation
+  alpha = 0.05,  # Two-sided alpha = 0.05
+)
+```
+
+We have N = 462.
+
+Using `WRestimates`:
+
+```{r}
+library(WRestimates)
+
+wr.ss(
+  WR = 1.5,      # Win ratio = 1.5
+  alpha = 0.025, # One-sided alpha = 0.025, NOTE difference to hce and PASS!
+  beta = 0.10,   # Power = 90%
+  k = 0.5,       # 1:1 randomisation
+  p.tie = 0.15   # 15% ties
+)
+```
+Again we have N = 462.
+Please note well though the difference between `PASS 2025` and `hce` vs `WREstimates`.
+With `WREstimates` we had to halve the type-one error rate because it expects a one-sided alpha.
+
+# Simulation: the BREATHE-FREE scenario
+In more complex situations, where we have no idea what WR we might observe, or how frequent ties will be, simulation is the tool to use.
+The rest of the document uses the BREATHE-FREE scenario we discussed in class to run some simulations, estimate WRs we could plausibly detect given our beliefs on hierarchy compomonent means, and power at different sample sizes.
+
+As out hierarchy, we will use:
+
+| Priority | Outcome |
+| --- | --- |
+| 1 | All-cause mortality |
+| 2 | Severe exacerbations |
+| 3 | Moderate exacerbations |
+| 4 | 6-minute walk distance (6MWD) |
+
+
+## Outcome 1 - All-cause mortality
+
+- **Outcome type**: Time-to-event
+- **Distribution**: Exponential
+- **Control-arm assumption**: 10% mortality by 24 months
+- **Treatment effect**: Hazard ratio = 0.85 (~8.5% in treatment arm)
+
+```{r}
+# ASSUMPTIONS
+followup_time <- 24
+
+lambda_death_ctrl <- -log(1 - 0.10) / followup_time # rate parameter for Exponential distribution
+hr_death <- 0.85 # hazard ratio
+```
+
+```{r}
+set.seed(2026)
+library(dplyr)
+library(ggplot2)
+
+# SIMULATE DATA
+d_death <- bind_rows(
+  data.frame(time = rexp(100000, rate = lambda_death_ctrl), arm = "Control"),
+  data.frame(time = rexp(100000, rate = lambda_death_ctrl * hr_death),  arm = "Treatment")
+)
+
+# PLOT
+ggplot(d_death, aes(x = time, colour = arm)) +
+  stat_ecdf(geom = "step", linewidth = 1) +
+  geom_vline(xintercept = followup_time, linetype = "dashed", colour = "grey50") +
+  geom_hline(yintercept = 0.10, linetype = "dotted", colour = "grey50") +
+  scale_x_continuous(breaks = seq(0, 24, 6)) +
+  coord_cartesian(xlim = c(0, 25), ylim = c(0, 0.25)) +
+  labs(x = "Months", y = "Cumulative mortality probability",
+       title = "Simulated vs assumed 24-month mortality risk",
+       colour = NULL) +
+  theme_minimal(base_size = 13)
+```
+
+
+## Outcome 2 - Severe exacerbations
+
+- **Outcome type**: Count
+- **Distribution**: Poisson
+- **Control-arm assumption**: 0.8 event
+- **Treatment effect**: Rate ratio = 0.70 (~0.56 events in the treatment arm)
+
+```{r}
+# ASSUMPTIONS
+lambda_severe_ctrl <- 0.8 # mean parameter for Poisson distribution
+rr_severe <- 0.70 # rate ratio
+```
+
+
+```{r}
+set.seed(2026)
+
+# SIMULATE DATA
+d_exacer_sev <- bind_rows(
+  data.frame(N_event = rpois(100000, lambda = lambda_severe_ctrl), arm = "Control"),
+  data.frame(N_event = rpois(100000, lambda = lambda_severe_ctrl * rr_severe), arm = "Treatment")
+) |> 
+  mutate(
+    N_event_cat = pmin(N_event, 4),
+    N_event_cat = factor(N_event_cat, levels = 0:4, labels = c("0","1","2","3","4+"))
+  )
+
+# GET PROPOTIONS
+d_exacer_sev_prop <- d_exacer_sev |> 
+  count(arm, N_event_cat, name = "n") |> 
+  group_by(arm) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup()
+
+# PLOT
+ggplot(d_exacer_sev_prop, aes(x = N_event_cat, y = prop, fill = arm)) +
+  geom_col(position = "dodge") +
+  labs(x = "Severe exacerbations (count)", y = "Proportion of patients", fill = NULL,
+       title = "Simulated severe exacerbation counts by arm") +
+  theme_minimal(base_size = 13)
+```
+
+
+## Outcome 3 - Moderate exacerbations
+
+- **Outcome type**: Count
+- **Distribution**: Poisson
+- **Control-arm assumption**: 2.0 events
+- **Treatment effect**: Rate ratio = 0.80 (~1.6 events in the treatment arm)
+
+```{r}
+# ASSUMPTIONS
+lambda_moderate_ctrl <- 2.0 # mean parameter for Poisson distribution
+rr_moderate <- 0.80 # rate ratio
+```
+
+```{r}
+# SIMULATE DATA
+d_exacer_mod <- bind_rows(
+  data.frame(N_event = rpois(100000, lambda = lambda_moderate_ctrl), arm = "Control"),
+  data.frame(N_event = rpois(100000, lambda = lambda_moderate_ctrl * rr_moderate), arm = "Treatment")
+) |> 
+  mutate(
+    N_event_cat = pmin(N_event, 5),
+    N_event_cat = factor(N_event_cat, levels = 0:5, labels = c("0","1","2","3","4","5+"))
+  )
+
+# GET PROPOTIONS
+d_exacer_mod_prop <- d_exacer_mod |> 
+  count(arm, N_event_cat, name = "n") |> 
+  group_by(arm) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup()
+
+# PLOT
+ggplot(d_exacer_mod_prop, aes(x = N_event_cat, y = prop, fill = arm)) +
+  geom_col(position = "dodge") +
+  labs(x = "Severe exacerbations (count)", y = "Proportion of patients", fill = NULL,
+       title = "Simulated moderate exacerbation counts by arm") +
+  theme_minimal(base_size = 13)
+```
+
+
+## Outcome 4: 6-minute walk distance
+
+- **Outcome type**: Continuous
+- **Distribution**: Normal
+- **Control-arm assumption**: Mean = 250 / SD = 60
+- **Treatment effect**: Mean difference = 30 (mean = 280 in treatment arm, assume same SD)
+
+```{r}
+# ASSUMPTIONS
+walk_mean_ctrl <- 250
+walk_mean_trt  <- 280
+walk_sd <- 60
+```
+
+```{r}
+set.seed(2026)
+
+# SIMULATE DATA
+d_6mwd <- bind_rows(
+  data.frame(walk_distance = rnorm(100000, mean = walk_mean_ctrl, sd = walk_sd), arm = "Control"),
+  data.frame(walk_distance = rnorm(100000, mean = walk_mean_trt, sd = walk_sd), arm = "Treatment")
+)
+
+# PLOT
+ggplot(d_6mwd, aes(x = walk_distance, fill = arm)) +
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = c(walk_mean_ctrl, walk_mean_trt), linetype = "dashed",
+             colour = c("#F8766D", "#00BFC4")) +
+  labs(x = "6-minute walk distance (m)", y = "Density", fill = NULL,
+       title = "Simulated 6MWD by arm") +
+  theme_minimal(base_size = 13)
+```
+
+
+## Dependence structure across outcomes
+
+**Dependence between outcomes**:
+
+- mortality vs. either exacerbation count: **negative** correlation (longer survival goes with fewer exacerbations)
+- mortality vs. 6MWD: **positive** correlation (both move with overall health in the same direction)
+- severe vs. moderate exacerbations: **positive** correlation (shared disease severity drives both)
+- either exacerbation count vs. 6MWD: **negative** correlation
+
+|              | Mortality | Severe | Moderate | Walk  |
+|--------------|-----------|--------|----------|-------|
+| **Mortality**|   1.00    | -0.35  |  -0.20   | 0.30  |
+| **Severe**   |  -0.35    |  1.00  |   0.45   | -0.30 |
+| **Moderate** |  -0.20    |  0.45  |   1.00   | -0.15 |
+| **Walk**     |   0.30    | -0.30  |  -0.15   | 1.00  |
+
+```{r}
+library(copula)
+
+# CORRELATION STRUCTURE
+rho <- c(mort_severe     = -0.35,
+         mort_moderate   = -0.20,
+         mort_walk       =  0.30,
+         severe_moderate =  0.45,
+         severe_walk     = -0.30,
+         moderate_walk   = -0.15)
+
+
+cop_trt <- normalCopula(param = rho, dim = 4, dispstr = "un")
+#cop_trt <- normalCopula(param = 0, dim = 4) # assuming no correlation
+cop_con <- cop_trt   # assume the same dependence structure in both arms
+
+margins_trt <- c("exp", "pois", "pois", "norm")
+paramMargins_trt <- list(
+  list(rate = lambda_death_ctrl * hr_death),
+  list(lambda = lambda_severe_ctrl * rr_severe),
+  list(lambda = lambda_moderate_ctrl * rr_moderate),
+  list(mean = walk_mean_trt, sd = walk_sd)
+)
+
+margins_con <- c("exp", "pois", "pois", "norm")
+paramMargins_con <- list(
+  list(rate = lambda_death_ctrl),
+  list(lambda = lambda_severe_ctrl),
+  list(lambda = lambda_moderate_ctrl),
+  list(mean = walk_mean_ctrl, sd = walk_sd)
+)
+```
+
+
+## Simulate data using `sim.data()`
+
+```{r}
+library(WINS)
+
+# SIMULATE ALL OUTCOMES
+data_simu <- sim.data(
+  randomseed = 2026, n_trt = 100, n_con = 100, n_ep = 4,
+  arm.name = c("trt", "con"),
+  ep_type = c("tte", "continuous", "continuous", "continuous"), # outcome type
+  cdist.rate = 0.02, # rate for lost of follow-up 
+  sim_method = "copula",
+  copula_trt = cop_trt,
+  margins_trt = margins_trt,
+  paramMargins_trt = paramMargins_trt,
+  copula_con = cop_con,
+  margins_con = margins_con,
+  paramMargins_con = paramMargins_con
+)
+
+head(data_simu, 10)
+```
+
+```{r}
+# TIME TO EVENT OUTCOMES NOT AUTOMATICALLY CENSORED AT END OF STUDY TIME (24 MONTHS)
+data_simu$Delta_1[data_simu$Y_1>24] <- 0
+data_simu$Y_1[data_simu$Y_1>24] <- 24
+```
+
+
+## Win-ratio analysis using `win.stat()` simulations
+
+## Power calculation function
+
+Each replication is wrapped in `run_one_rep()` and dispatched with `furrr::future_map_dfr()`, so the
+`nsim` replications for a given scenario are spread across parallel workers rather than looped over
+sequentially.
+
+```{r}
+power_at_n <- function(n_per_arm = 150, hr_death = 0.85, rr_severe = 0.70, nsim = 100, seed0 = 2026) {
+  
+  # only the mortality and severe-exacerbation treatment margins change with
+  # the assumptions being varied - moderate exacerbations and 6MWD stay fixed
+  paramMargins_trt_sens <- list(
+    list(rate = lambda_death_ctrl * hr_death),
+    list(lambda = lambda_severe_ctrl * rr_severe),
+    list(lambda = lambda_moderate_ctrl * rr_moderate),
+    list(mean = walk_mean_trt, sd = walk_sd)
+  )
+  
+  # ---- one replication, returned as a 1-row data.frame ----
+  run_one_rep <- function(i) {
+    
+    # simulate data
+    data_simu <- sim.data(
+      randomseed = seed0 + i, n_trt = n_per_arm, n_con = n_per_arm, n_ep = 4,
+      arm.name = c("trt", "con"),
+      ep_type = c("tte", "continuous", "continuous", "continuous"),
+      cdist.rate = 0.02, 
+      sim_method = "copula",
+      copula_trt = cop_trt,
+      margins_trt = margins_trt,
+      paramMargins_trt = paramMargins_trt_sens,
+      copula_con = cop_con,
+      margins_con = margins_con,
+      paramMargins_con = paramMargins_con
+    )
+    
+    # censor at 24 months (end of study)
+    data_simu$Delta_1[data_simu$Y_1>24] <- 0
+    data_simu$Y_1[data_simu$Y_1>24] <- 24
+    
+    # perform win-ratio analysis
+    res <- win.stat(
+        data = data_simu, 
+        ep_type = c("tte", "continuous", "continuous", "continuous"),
+        arm.name = c("trt", "con"), 
+        priority = c(1, 2, 3, 4), # outcome hierarchy
+        tau = c(0, 0, 0, 0), 
+        np_direction = c("larger", "smaller", "smaller", "larger"), # direction to win
+        pvalue = "two-sided", digit = 5, summary.print = FALSE
+      )
+    
+    data.frame(
+      reject = res$p_value$pvalue_WR < 0.05,
+      wr     = res$Win_statistic$Win_Ratio["WR"]
+    )
+    
+  }
+  
+  rep_res <- future_map_dfr(
+    seq_len(nsim),
+    run_one_rep,
+    .options = furrr_options(seed = TRUE) # ensures proper RNG stream per worker
+  )
+  
+  out <- data.frame(power = mean(rep_res$reject), mean_WR = mean(rep_res$wr))
+  
+  return(out)
+  
+}
+```
+
+## Different scenarios
+
+- **Number of subjects per arm**: 100, 150, 200
+- **HR for mortality outcome**: 0.75, 0.85
+- **RR for severe exacerbation**: 0.7, 0.8
+
+```{r}
+library(furrr)
+
+# START PARALLEL WORKERS - reused across all scenarios below
+plan(multisession, workers = max(1, parallel::detectCores() - 1))
+```
+
+The following chunk takes a few minutes to run:
+```{r, cache=TRUE}
+# SCENARIO DATASET
+sensitivity_grid <- expand.grid(
+  n_per_arm = c(100, 150, 200),
+  hr_death  = c(0.75, 0.85),
+  rr_severe = c(0.7, 0.8)
+)
+
+# RUN SIMULATIONS FOR ALL SCENARIOS
+sensitivity_results <- lapply(seq_len(nrow(sensitivity_grid)), function(i) {
+  
+  scenario_i <- sensitivity_grid[i, ]
+  
+  simu_res <- power_at_n(n_per_arm = scenario_i$n_per_arm, hr_death = scenario_i$hr_death, rr_severe = scenario_i$rr_severe, nsim = 100)
+  
+  out <- scenario_i |> 
+    dplyr::mutate(
+      power = simu_res$power,
+      mean_WR = simu_res$mean_WR
+    )
+  
+  return(out)
+  
+}) |> 
+  bind_rows()
+
+sensitivity_results
+```
+
+```{r}
+# STOP PARALLEL WORKERS - release once all scenarios are done
+plan(sequential)
+```
+
+**Runtime note**: Only 100 replications are performed per scenario for this example, but in practice, this should be run across 10,000 replications. The `nsim` replications within each scenario are now run in parallel via `furrr`/`future` (see `power_at_n()` above), which substantially reduces computation time; the 12 scenarios in `sensitivity_grid` are still evaluated one at a time via `lapply()`, so each scenario's replications share the full pool of workers in turn.
+
+## Visualize power and sample size
+
+```{r}
+ggplot(sensitivity_results, aes(x = n_per_arm, y = power, colour = factor(rr_severe))) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 0.80, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~ hr_death, labeller = label_both) +
+  labs(
+    x = "Sample size per arm",
+    y = "Empirical power",
+    colour = "Rate ratio\n(severe exac.)",
+    title = "Win ratio power across mortality HR and severe exacerbation RR assumptions",
+    subtitle = "Facets: assumed hazard ratio for mortality \u00B7 BREATHE-FREE outcomes 1-4"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top")
+```
